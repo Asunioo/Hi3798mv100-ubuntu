@@ -1,0 +1,64 @@
+name: Build Hi3798MV100 Ubuntu 20.04 RootFS
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  build-rootfs:
+    runs-on: ubuntu-20.04 # 使用与目标系统一致的宿主环境兼容性最好
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y debootstrap qemu-user-static binfmt-support parted wget
+
+      - name: Create RootFS via Debootstrap
+        run: |
+          export ARCH="armhf"
+          export DISTRO="focal"
+          export MIRROR="https://mirrors.huaweicloud.com/ubuntu-ports"
+          export ROOTFS_DIR="./ubuntu-focal-armhf-rootfs"
+          
+          # 创建目录并执行 debootstrap (第一阶段)
+          sudo mkdir -p $ROOTFS_DIR
+          sudo qemu-debootstrap --arch=$ARCH --foreign --variant=minbase $DISTRO $ROOTFS_DIR $MIRROR
+          
+          # 复制 QEMU 解释器到目标系统
+          sudo cp /usr/bin/qemu-arm-static $ROOTFS_DIR/usr/bin/
+          
+          # 执行 debootstrap (第二阶段)
+          sudo chroot $ROOTFS_DIR /debootstrap/debootstrap --second-stage
+          
+          # 清理 QEMU 解释器
+          sudo rm $ROOTFS_DIR/usr/bin/qemu-arm-static
+
+      - name: Configure System and Clean up
+        run: |
+          export ROOTFS_DIR="./ubuntu-focal-armhf-rootfs"
+          # 配置基础网络和环境
+          echo "hi3798mv100" | sudo tee $ROOTFS_DIR/etc/hostname
+          cat <<EOF | sudo tee $ROOTFS_DIR/etc/apt/sources.list
+          deb https://mirrors.huaweicloud.com/ubuntu-ports focal main restricted universe multiverse
+          EOF
+          
+          # 清理缓存以减小体积
+          sudo chroot $ROOTFS_DIR apt-get clean
+          sudo chroot $ROOTFS_DIR rm -rf /var/lib/apt/lists/*
+
+      - name: Package RootFS
+        run: |
+          tar -czf hi3798mv100_ubuntu20.04_rootfs.tar.gz -C ./ubuntu-focal-armhf-rootfs .
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hi3798mv100-ubuntu20.04-rootfs
+          path: hi3798mv100_ubuntu20.04_rootfs.tar.gz
+          retention-days: 7
