@@ -62,14 +62,14 @@ jobs:
           echo "=> Writing Netplan network config..."
           sudo mkdir -p ${ROOTFS_DIR}/etc/netplan/
           sudo tee ${ROOTFS_DIR}/etc/netplan/01-netcfg.yaml > /dev/null << 'EOF'
-network:
-  version: 2
-  renderer: networkd
-  ethernets:
-    eth0:
-      dhcp4: true
-      macaddress: BC:25:E0:3F:F1:D9
-EOF
+          network:
+            version: 2
+            renderer: networkd
+            ethernets:
+              eth0:
+                dhcp4: true
+                macaddress: BC:25:E0:3F:F1:D9
+          EOF
 
           # 7. 启用网络服务开机自启
           echo "=> Enabling network service..."
