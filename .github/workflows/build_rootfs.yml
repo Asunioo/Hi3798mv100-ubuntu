@@ -12,7 +12,7 @@ jobs:
     steps:
       # 1. 检出代码仓库 (对应截图底部的 Post Checkout)
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # 2. 安装必要的依赖工具 (QEMU用于模拟ARM架构)
       - name: Install dependencies
@@ -54,7 +54,7 @@ jobs:
 
       # 6. 上传产物 (对应截图 Upload Artifact)
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: hi3798mv100-rootfs
           path: hi3798mv100_ubuntu20.04_rootfs.tar.gz
