@@ -1,38 +1,35 @@
-name: Build RootFS
+name: Build RootFS (EXT4 Image)
 
 on:
   push:
-    branches: [ "main" ] # 或者你的主分支名称
-  workflow_dispatch:      # 允许手动触发
+    branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   build-rootfs:
-    runs-on: ubuntu-latest # 使用 Ubuntu 最新版作为构建环境
+    runs-on: ubuntu-latest # 使用最新的 Ubuntu Runner
 
     steps:
-      # 1. 检出代码仓库 (对应截图底部的 Post Checkout)
+      # 1. 检出代码仓库
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6 # 使用 v6 版本
 
-      # 2. 安装必要的依赖工具 (QEMU用于模拟ARM架构)
+      # 2. 安装必要的依赖工具 (QEMU, debootstrap, e2fsprogs)
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y debootstrap qemu-user-static binfmt-support
+          sudo apt-get install -y debootstrap qemu-user-static binfmt-support e2fsprogs dosfstools
 
-      # 3. 创建 RootFS (对应截图第一步 Create RootFS via Debootstrap)
+      # 3. 创建 RootFS (Debootstrap)
       - name: Create RootFS via Debootstrap
         run: |
-          # 注意：debootstrap 通常需要 root 权限，所以加 sudo
-          # --arch=armhf 指定架构
-          # focal 是 Ubuntu 20.04 的代号
-          # ./ubuntu-focal-armhf-rootfs 是输出目录
+          # --arch=armhf 指定架构，focal 是 Ubuntu 20.04
           sudo debootstrap --arch=armhf --foreign focal ./ubuntu-focal-armhf-rootfs http://mirrors.huaweicloud.com/ubuntu-ports/
 
           # 复制 QEMU 模拟器进入目标系统，以便后续能 chroot 进去执行命令
           sudo cp /usr/bin/qemu-arm-static ./ubuntu-focal-armhf-rootfs/usr/bin/
 
-      # 4. 配置系统和清理 (对应截图第二步 Configure System and Clean up)
+      # 4. 配置系统和清理
       - name: Configure System and Clean up
         run: |
           export ROOTFS_DIR="./ubuntu-focal-armhf-rootfs"
@@ -40,21 +37,47 @@ jobs:
           # 设置源 (参考截图中的华为云源)
           echo "deb https://mirrors.huaweicloud.com/ubuntu-ports/ focal main restricted universe multiverse" | sudo tee ${ROOTFS_DIR}/etc/apt/sources.list
 
-          # 这里通常还需要执行 second-stage 脚本来完成安装
-          # sudo chroot ${ROOTFS_DIR} /debootstrap/debootstrap --second-stage
+          # 【重要】执行 second-stage 脚本以完成软件包安装和配置
+          # 这一步对于生成可用的 ext4 镜像至关重要
+          sudo chroot ${ROOTFS_DIR} /debootstrap/debootstrap --second-stage
 
-          # 你可以在这里添加更多自定义配置命令...
+          # 清理 apt 缓存以减小镜像体积
+          sudo chroot ${ROOTFS_DIR} apt-get clean
 
-      # 5. 打包 RootFS (这是你报错的地方，已修复)
-      - name: Package RootFS
+      # 5. 构建 EXT4 镜像文件 (这是修改的核心部分)
+      - name: Build EXT4 Image
         run: |
-          # 【关键修复】：必须使用 sudo tar，因为生成的文件系统包含大量 root 权限文件
-          # 普通用户无法读取 /etc/shadow 等敏感文件，会导致 Permission denied
-          sudo tar -czf hi3798mv100_ubuntu20.04_rootfs.tar.gz -C ./ubuntu-focal-armhf-rootfs .
+          ROOTFS_DIR="./ubuntu-focal-armhf-rootfs"
+          IMAGE_NAME="hi3798mv100_ubuntu20.04_rootfs.img"
+          # 设置镜像大小，这里设置为 1GB (1024M)，你可以根据实际文件大小调整
+          IMAGE_SIZE="1G"
 
-      # 6. 上传产物 (对应截图 Upload Artifact)
+          echo "Creating empty image file..."
+          # 创建空文件
+          fallocate -l $IMAGE_SIZE $IMAGE_NAME
+
+          echo "Formatting as ext4..."
+          # 格式化为 ext4
+          sudo mkfs.ext4 -F $IMAGE_NAME
+
+          echo "Mounting image..."
+          # 创建挂载点并挂载镜像
+          mkdir -p mnt
+          sudo mount -o loop $IMAGE_NAME mnt
+
+          echo "Copying rootfs to image..."
+          # 使用 rsync 复制文件，保留权限、所有者和时间戳 (-a)
+          # 注意：这里不需要 tar，直接复制目录内容
+          sudo rsync -aAXv ${ROOTFS_DIR}/ mnt/
+
+          echo "Unmounting..."
+          # 卸载并清理挂载点
+          sudo umount mnt
+          rm -rf mnt
+
+      # 6. 上传产物
       - name: Upload Artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v6 # 使用 v6 版本
         with:
-          name: hi3798mv100-rootfs
-          path: hi3798mv100_ubuntu20.04_rootfs.tar.gz
+          name: hi3798mv100-rootfs-img
+          path: hi3798mv100_ubuntu20.04_rootfs.img
