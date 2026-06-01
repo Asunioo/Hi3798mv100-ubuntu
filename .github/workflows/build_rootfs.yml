@@ -10,40 +10,44 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. 检出代码仓库 - 使用最新 v6 版本
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      # 2. 安装必要的依赖工具
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y debootstrap qemu-user-static binfmt-support e2fsprogs dosfstools
 
-      # 3. 创建 RootFS (Debootstrap)
       - name: Create RootFS via Debootstrap
         run: |
-          # 下载基础系统 (armhf架构, Ubuntu Focal)
+          # 1. 初始化下载
           sudo debootstrap --arch=armhf --foreign focal ./ubuntu-focal-armhf-rootfs http://mirrors.huaweicloud.com/ubuntu-ports/
-          
-          # 复制 QEMU 模拟器进入目标系统，以便后续能 chroot 进去执行命令
+          # 2. 复制 QEMU
           sudo cp /usr/bin/qemu-arm-static ./ubuntu-focal-armhf-rootfs/usr/bin/
 
-      # 4. 配置系统和注入网卡信息
-      - name: Configure System and Inject Network Config
+      # --- 关键修改点：将配置合并到这一步，并调整顺序 ---
+      - name: Finalize System and Set Config
         run: |
           export ROOTFS_DIR="./ubuntu-focal-armhf-rootfs"
-
-          # 设置 apt 源 (华为云)
+          
+          # 1. 首先执行 Second Stage (这会真正安装核心软件包并创建 root 用户)
+          echo "=> Executing debootstrap second-stage..."
+          sudo chroot ${ROOTFS_DIR} /debootstrap/debootstrap --second-stage
+          
+          # 2. 设置 apt 源
+          echo "=> Configuring APT sources..."
           echo "deb https://mirrors.huaweicloud.com/ubuntu-ports/ focal main restricted universe multiverse" | sudo tee ${ROOTFS_DIR}/etc/apt/sources.list
-
-          # 设置 root 默认密码为 123456
+          
+          # 3. 现在可以安全地设置密码了 (root 用户已存在)
+          echo "=> Setting root password..."
           sudo chroot ${ROOTFS_DIR} /bin/bash -c 'echo "root:123456" | chpasswd'
-
-          # 允许 root 远程 SSH 登录
-          sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' ${ROOTFS_DIR}/etc/ssh/sshd_config || true
-
-          # --- 关键步骤：注入网卡 eth0 配置并固定 MAC 地址 ---
+          
+          # 4. 允许 SSH Root 登录
+          echo "=> Configuring SSH..."
+          sudo sed -i 's/#*PermitRootLogin.*/PermitRootLogin yes/' ${ROOTFS_DIR}/etc/ssh/sshd_config || true
+          
+          # 5. 注入网卡配置 (保持不变)
+          echo "=> Writing network interfaces..."
           sudo tee ${ROOTFS_DIR}/etc/network/interfaces > /dev/null << 'EOF'
           auto lo
           iface lo inet loopback
@@ -53,49 +57,35 @@ jobs:
               hwaddress ether BC:25:E0:3F:F1:D9
           EOF
 
-          # 执行 second-stage 完成最终的系统安装配置
-          sudo chroot ${ROOTFS_DIR} /debootstrap/debootstrap --second-stage
-
-          # 清理 apt 缓存以减小镜像体积
+          # 6. 清理缓存
           sudo chroot ${ROOTFS_DIR} apt-get clean
 
-      # 5. 打包为 EXT4 镜像
-      - name: Package RootFS to EXT4
+      # --- 打包步骤 ---
+      - name: Package to EXT4
         run: |
-          IMAGE_NAME="hi3798mv100_ubuntu20.04_rootfs.img"
-          ROOTFS_DIR="./ubuntu-focal-armhf-rootfs"
+          IMAGE_NAME="hi3798mv100_rootfs.img"
+          DIR="./ubuntu-focal-armhf-rootfs"
+          
+          # 计算大小
+          SIZE=$(sudo du -sm $DIR | cut -f1)
+          IMAGE_SIZE=$((SIZE + 200))
+          
+          # 创建镜像
+          dd if=/dev/zero of=$IMAGE_NAME bs=1M count=$IMAGE_SIZE
+          mkfs.ext4 -F $IMAGE_NAME
+          
+          # 挂载并复制
+          sudo mkdir -p /mnt/temp
+          sudo mount -o loop $IMAGE_NAME /mnt/temp
+          sudo cp -a $DIR/. /mnt/temp/
+          sudo umount /mnt/temp
+          
+          # 优化镜像体积
+          e2fsck -f -y $IMAGE_NAME || true
+          resize2fs -M $IMAGE_NAME || true
 
-          # 动态计算镜像大小 (文件夹大小 + 200MB 余量)
-          FOLDER_SIZE=$(sudo du -sm ${ROOTFS_DIR} | awk '{print $1}')
-          IMAGE_SIZE=$((FOLDER_SIZE + 200))
-
-          echo "Folder size: ${FOLDER_SIZE}MB, Creating image with size: ${IMAGE_SIZE}MB"
-
-          # 创建空镜像文件
-          dd if=/dev/zero of=${IMAGE_NAME} bs=1M count=${IMAGE_SIZE} status=progress
-
-          # 格式化为 ext4
-          mkfs.ext4 -F ${IMAGE_NAME}
-
-          # 挂载镜像
-          MOUNT_POINT="/mnt/rootfs_build"
-          sudo mkdir -p ${MOUNT_POINT}
-          sudo mount -o loop ${IMAGE_NAME} ${MOUNT_POINT}
-
-          # 复制文件系统内容到镜像中 (保留所有权限和属性)
-          sudo cp -a ${ROOTFS_DIR}/. ${MOUNT_POINT}/
-
-          # 卸载镜像
-          sudo umount ${MOUNT_POINT}
-          sudo rmdir ${MOUNT_POINT}
-
-          # 检查并修复文件系统，并压缩镜像到最小体积
-          e2fsck -f -y ${IMAGE_NAME} || true
-          resize2fs -M ${IMAGE_NAME} || true
-
-      # 6. 上传产物
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
-          name: hi3798mv100-rootfs-ext4
-          path: hi3798mv100_ubuntu20.04_rootfs.img
+          name: ubuntu-rootfs
+          path: hi3798mv100_rootfs.img
