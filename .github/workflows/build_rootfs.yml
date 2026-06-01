@@ -20,34 +20,46 @@ jobs:
 
       - name: Create RootFS via Debootstrap
         run: |
-          # 1. 初始化下载
           sudo debootstrap --arch=armhf --foreign focal ./ubuntu-focal-armhf-rootfs http://mirrors.huaweicloud.com/ubuntu-ports/
-          # 2. 复制 QEMU
           sudo cp /usr/bin/qemu-arm-static ./ubuntu-focal-armhf-rootfs/usr/bin/
 
-      # --- 关键修改点：将配置合并到这一步，并调整顺序 ---
       - name: Finalize System and Set Config
         run: |
           export ROOTFS_DIR="./ubuntu-focal-armhf-rootfs"
           
-          # 1. 首先执行 Second Stage (这会真正安装核心软件包并创建 root 用户)
+          # 1. 执行 Second Stage
           echo "=> Executing debootstrap second-stage..."
           sudo chroot ${ROOTFS_DIR} /debootstrap/debootstrap --second-stage
           
-          # 2. 设置 apt 源
+          # 2. 更新源并安装必要的软件包 (关键修复：安装 openssh-server)
+          echo "=> Installing openssh-server and network tools..."
+          # 挂载 proc 和 sys 以确保 apt 能正常运行
+          sudo mount -t proc /proc ${ROOTFS_DIR}/proc
+          sudo mount -t sysfs /sys ${ROOTFS_DIR}/sys
+          # 安装软件包
+          sudo chroot ${ROOTFS_DIR} apt-get update
+          sudo chroot ${ROOTFS_DIR} apt-get install -y openssh-server net-tools
+          # 卸载 proc 和 sys
+          sudo umount ${ROOTFS_DIR}/proc
+          sudo umount ${ROOTFS_DIR}/sys
+
+          # 3. 设置 apt 源
           echo "=> Configuring APT sources..."
           echo "deb https://mirrors.huaweicloud.com/ubuntu-ports/ focal main restricted universe multiverse" | sudo tee ${ROOTFS_DIR}/etc/apt/sources.list
           
-          # 3. 现在可以安全地设置密码了 (root 用户已存在)
+          # 4. 设置 root 密码
           echo "=> Setting root password..."
           sudo chroot ${ROOTFS_DIR} /bin/bash -c 'echo "root:123456" | chpasswd'
           
-          # 4. 允许 SSH Root 登录
+          # 5. 配置 SSH (现在文件肯定存在了)
           echo "=> Configuring SSH..."
-          sudo sed -i 's/#*PermitRootLogin.*/PermitRootLogin yes/' ${ROOTFS_DIR}/etc/ssh/sshd_config || true
+          # 使用 printf 确保换行符正确
+          printf "PermitRootLogin yes\nPasswordAuthentication yes\n" | sudo tee -a ${ROOTFS_DIR}/etc/ssh/sshd_config > /dev/null
           
-          # 5. 注入网卡配置 (保持不变)
+          # 6. 创建网卡配置目录并写入配置
           echo "=> Writing network interfaces..."
+          # 确保目录存在
+          sudo mkdir -p ${ROOTFS_DIR}/etc/network/
           sudo tee ${ROOTFS_DIR}/etc/network/interfaces > /dev/null << 'EOF'
           auto lo
           iface lo inet loopback
@@ -57,30 +69,25 @@ jobs:
               hwaddress ether BC:25:E0:3F:F1:D9
           EOF
 
-          # 6. 清理缓存
+          # 7. 清理缓存
           sudo chroot ${ROOTFS_DIR} apt-get clean
 
-      # --- 打包步骤 ---
       - name: Package to EXT4
         run: |
           IMAGE_NAME="hi3798mv100_rootfs.img"
           DIR="./ubuntu-focal-armhf-rootfs"
           
-          # 计算大小
           SIZE=$(sudo du -sm $DIR | cut -f1)
           IMAGE_SIZE=$((SIZE + 200))
           
-          # 创建镜像
           dd if=/dev/zero of=$IMAGE_NAME bs=1M count=$IMAGE_SIZE
           mkfs.ext4 -F $IMAGE_NAME
           
-          # 挂载并复制
           sudo mkdir -p /mnt/temp
           sudo mount -o loop $IMAGE_NAME /mnt/temp
           sudo cp -a $DIR/. /mnt/temp/
           sudo umount /mnt/temp
           
-          # 优化镜像体积
           e2fsck -f -y $IMAGE_NAME || true
           resize2fs -M $IMAGE_NAME || true
 
