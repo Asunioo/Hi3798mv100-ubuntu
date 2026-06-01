@@ -10,89 +10,104 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 1. 检出代码仓库 - 使用最新 v6 版本
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      # 2. 安装构建所需的依赖工具
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y debootstrap qemu-user-static binfmt-support e2fsprogs dosfstools
 
+      # 3. 创建 RootFS (Debootstrap 第一阶段)
       - name: Create RootFS via Debootstrap
         run: |
+          # 下载基础系统 (armhf架构, Ubuntu Focal)
           sudo debootstrap --arch=armhf --foreign focal ./ubuntu-focal-armhf-rootfs http://mirrors.huaweicloud.com/ubuntu-ports/
+          # 复制 QEMU 模拟器，以便后续 chroot 执行命令
           sudo cp /usr/bin/qemu-arm-static ./ubuntu-focal-armhf-rootfs/usr/bin/
 
+      # 4. 完成系统安装与核心配置
       - name: Finalize System and Set Config
         run: |
           export ROOTFS_DIR="./ubuntu-focal-armhf-rootfs"
           
-          # 1. 执行 Second Stage
+          # 1. 执行 Second Stage (完成基础软件包安装)
           echo "=> Executing debootstrap second-stage..."
           sudo chroot ${ROOTFS_DIR} /debootstrap/debootstrap --second-stage
           
-          # 2. 更新源并安装必要的软件包 (关键修复：安装 openssh-server)
+          # 2. 挂载 proc 和 sys 并安装必要的软件包 (openssh-server, iproute2等)
           echo "=> Installing openssh-server and network tools..."
-          # 挂载 proc 和 sys 以确保 apt 能正常运行
           sudo mount -t proc /proc ${ROOTFS_DIR}/proc
           sudo mount -t sysfs /sys ${ROOTFS_DIR}/sys
-          # 安装软件包
           sudo chroot ${ROOTFS_DIR} apt-get update
-          sudo chroot ${ROOTFS_DIR} apt-get install -y openssh-server net-tools
-          # 卸载 proc 和 sys
+          sudo chroot ${ROOTFS_DIR} apt-get install -y openssh-server iproute2
           sudo umount ${ROOTFS_DIR}/proc
           sudo umount ${ROOTFS_DIR}/sys
 
-          # 3. 设置 apt 源
+          # 3. 设置 apt 源 (华为云)
           echo "=> Configuring APT sources..."
           echo "deb https://mirrors.huaweicloud.com/ubuntu-ports/ focal main restricted universe multiverse" | sudo tee ${ROOTFS_DIR}/etc/apt/sources.list
           
-          # 4. 设置 root 密码
+          # 4. 设置 root 默认密码为 123456
           echo "=> Setting root password..."
           sudo chroot ${ROOTFS_DIR} /bin/bash -c 'echo "root:123456" | chpasswd'
           
-          # 5. 配置 SSH (现在文件肯定存在了)
+          # 5. 配置 SSH 允许 root 远程登录
           echo "=> Configuring SSH..."
-          # 使用 printf 确保换行符正确
           printf "PermitRootLogin yes\nPasswordAuthentication yes\n" | sudo tee -a ${ROOTFS_DIR}/etc/ssh/sshd_config > /dev/null
           
-          # 6. 创建网卡配置目录并写入配置
-          echo "=> Writing network interfaces..."
-          # 确保目录存在
-          sudo mkdir -p ${ROOTFS_DIR}/etc/network/
-          sudo tee ${ROOTFS_DIR}/etc/network/interfaces > /dev/null << 'EOF'
-          auto lo
-          iface lo inet loopback
+          # 6. 使用 Netplan 配置网卡 eth0 (核心修复：替换老旧的 interfaces 配置)
+          echo "=> Writing Netplan network config..."
+          sudo mkdir -p ${ROOTFS_DIR}/etc/netplan/
+          sudo tee ${ROOTFS_DIR}/etc/netplan/01-netcfg.yaml > /dev/null << 'EOF'
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    eth0:
+      dhcp4: true
+      macaddress: BC:25:E0:3F:F1:D9
+EOF
 
-          auto eth0
-          iface eth0 inet dhcp
-              hwaddress ether BC:25:E0:3F:F1:D9
-          EOF
+          # 7. 启用网络服务开机自启
+          echo "=> Enabling network service..."
+          sudo chroot ${ROOTFS_DIR} systemctl enable systemd-networkd
+          sudo chroot ${ROOTFS_DIR} systemctl enable systemd-resolved
 
-          # 7. 清理缓存
+          # 8. 清理 apt 缓存，减小镜像体积
           sudo chroot ${ROOTFS_DIR} apt-get clean
 
+      # 5. 打包为 EXT4 镜像
       - name: Package to EXT4
         run: |
           IMAGE_NAME="hi3798mv100_rootfs.img"
           DIR="./ubuntu-focal-armhf-rootfs"
           
+          # 动态计算文件夹大小并预留 200MB 空间
           SIZE=$(sudo du -sm $DIR | cut -f1)
           IMAGE_SIZE=$((SIZE + 200))
+          echo "Folder size: ${SIZE}MB, Creating image with size: ${IMAGE_SIZE}MB"
           
-          dd if=/dev/zero of=$IMAGE_NAME bs=1M count=$IMAGE_SIZE
+          # 创建空镜像文件
+          dd if=/dev/zero of=$IMAGE_NAME bs=1M count=$IMAGE_SIZE status=progress
+          # 格式化为 ext4
           mkfs.ext4 -F $IMAGE_NAME
           
+          # 挂载并复制文件系统内容
           sudo mkdir -p /mnt/temp
           sudo mount -o loop $IMAGE_NAME /mnt/temp
           sudo cp -a $DIR/. /mnt/temp/
           sudo umount /mnt/temp
           
+          # 检查文件系统并压缩镜像到最小体积
           e2fsck -f -y $IMAGE_NAME || true
           resize2fs -M $IMAGE_NAME || true
 
+      # 6. 上传生成的镜像产物
       - name: Upload Artifact
         uses: actions/upload-artifact@v6
         with:
-          name: ubuntu-rootfs
+          name: ubuntu-rootfs-ext4
           path: hi3798mv100_rootfs.img
