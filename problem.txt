@@ -1,1 +1,9 @@
-Hi3798MV100 运行 Ubuntu 24.04 LTS 时遇到的核心错误原因是 内核版本与用户空间系统组件严重不兼容。
+Hi3798MV100 
+运行 Ubuntu 20.04 LTS 时没有问题
+
+运行 Ubuntu 22.04 LTS ，能安装dcoker
+docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: cgroup namespaces aren't enabled in the kernel
+
+运行 Ubuntu 24.04 LTS 时遇到的核心错误原因是 内核版本与用户空间系统组件严重不兼容。
+
+编译Ubuntu 26.04 LTS 总是报错
