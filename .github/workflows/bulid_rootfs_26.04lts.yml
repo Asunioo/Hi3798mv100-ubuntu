@@ -54,10 +54,10 @@ jobs:
           # 设置 APT 源 (华为云镜像)
           echo "=> Configuring APT sources..."
           cat << 'EOF' | sudo tee ${ROOTFS_DIR}/etc/apt/sources.list
-deb https://mirrors.huaweicloud.com/ubuntu-ports/ resolute main restricted universe multiverse
-deb https://mirrors.huaweicloud.com/ubuntu-ports/ resolute-updates main restricted universe multiverse
-deb https://mirrors.huaweicloud.com/ubuntu-ports/ resolute-security main restricted universe multiverse
-EOF
+          deb https://mirrors.huaweicloud.com/ubuntu-ports/ resolute main restricted universe multiverse
+          deb https://mirrors.huaweicloud.com/ubuntu-ports/ resolute-updates main restricted universe multiverse
+          deb https://mirrors.huaweicloud.com/ubuntu-ports/ resolute-security main restricted universe multiverse
+          EOF
           
           # 设置主机名和 DNS
           echo "ubuntu-resolute" | sudo tee ${ROOTFS_DIR}/etc/hostname
