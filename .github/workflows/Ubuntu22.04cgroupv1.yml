@@ -1,0 +1,87 @@
+name: Prepare Hi3798MV100 RootFS with Docker
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-rootfs-docker:
+    runs-on: ubuntu-latest
+    steps:
+      # 1️⃣ 检出仓库
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # 2️⃣ 安装依赖
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static binfmt-support e2fsprogs dosfstools curl gnupg lsb-release
+
+      # 3️⃣ 挂载 rootfs
+      - name: Mount rootfs
+        run: |
+          ROOTFS_DIR="./ubuntu-jammy-armhf-rootfs"
+          IMAGE_NAME="hi3798mv100_rootfs_jammy.img"
+          sudo mkdir -p /mnt/temp
+          sudo mount -o loop $IMAGE_NAME /mnt/temp
+          sudo rsync -a /mnt/temp/ $ROOTFS_DIR/
+          sudo umount /mnt/temp
+
+      # 4️⃣ 修改 bootargs 并切换 cgroup v1
+      - name: Configure bootargs for cgroup v1
+        run: |
+          ROOTFS_DIR="./ubuntu-jammy-armhf-rootfs"
+          BOOT_CMDLINE_FILE="$ROOTFS_DIR/boot/boot.cmdline"
+          sudo mkdir -p $(dirname $BOOT_CMDLINE_FILE)
+          echo "console=ttyAMA0,115200 root=/dev/mmcblk0pX rw rootwait systemd.unified_cgroup_hierarchy=0" | sudo tee $BOOT_CMDLINE_FILE
+
+      # 5️⃣ 安装 Docker 并配置 cgroupfs
+      - name: Install Docker
+        run: |
+          ROOTFS_DIR="./ubuntu-jammy-armhf-rootfs"
+          sudo cp /usr/bin/qemu-arm-static $ROOTFS_DIR/usr/bin/
+          sudo mount -t proc /proc $ROOTFS_DIR/proc
+          sudo mount -t sysfs /sys $ROOTFS_DIR/sys
+          sudo mount -o bind /dev $ROOTFS_DIR/dev
+
+          sudo chroot $ROOTFS_DIR /bin/bash -c "
+          apt-get update &&
+          apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release &&
+          mkdir -p /etc/apt/keyrings &&
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg &&
+          echo \
+          'deb [arch=armhf signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable' \
+          | tee /etc/apt/sources.list.d/docker.list > /dev/null &&
+          apt-get update &&
+          apt-get install -y docker-ce docker-ce-cli containerd.io &&
+          mkdir -p /etc/docker &&
+          echo '{\"exec-opts\": [\"native.cgroupdriver=cgroupfs\"]}' > /etc/docker/daemon.json
+          "
+
+          sudo umount $ROOTFS_DIR/proc
+          sudo umount $ROOTFS_DIR/sys
+          sudo umount $ROOTFS_DIR/dev
+
+      # 6️⃣ 打包为新的 EXT4 镜像
+      - name: Package new rootfs
+        run: |
+          ROOTFS_DIR="./ubuntu-jammy-armhf-rootfs"
+          NEW_IMAGE="hi3798mv100_rootfs_docker.img"
+          SIZE=$(sudo du -sm $ROOTFS_DIR | cut -f1)
+          IMAGE_SIZE=$((SIZE + 200))
+          dd if=/dev/zero of=$NEW_IMAGE bs=1M count=$IMAGE_SIZE status=progress
+          mkfs.ext4 -F $NEW_IMAGE
+          sudo mkdir -p /mnt/temp
+          sudo mount -o loop $NEW_IMAGE /mnt/temp
+          sudo cp -a $ROOTFS_DIR/. /mnt/temp/
+          sudo umount /mnt/temp
+          e2fsck -f -y $NEW_IMAGE || true
+          resize2fs -M $NEW_IMAGE || true
+
+      # 7️⃣ 上传镜像产物
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: hi3798mv100-rootfs-docker
+          path: hi3798mv100_rootfs_docker.img
+          retention-days: 7
