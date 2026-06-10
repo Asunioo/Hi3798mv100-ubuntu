@@ -1,4 +1,4 @@
-name: Build Ubuntu 22.04 RootFS for cgroup v1
+name: Build Ubuntu 22.04 RootFS for Hi3798MV100
 
 on:
   workflow_dispatch:
@@ -27,30 +27,37 @@ jobs:
           
           echo "=> Executing debootstrap second-stage..."
           sudo chroot ${ROOTFS_DIR} /debootstrap/debootstrap --second-stage
-          
-          echo "=> Installing packages..."
-          sudo mount -t proc /proc ${ROOTFS_DIR}/proc
-          sudo mount -t sysfs /sys ${ROOTFS_DIR}/sys
-          sudo chroot ${ROOTFS_DIR} apt-get update
-          sudo chroot ${ROOTFS_DIR} apt-get install -y \
-            openssh-server iproute2 \
-            vim nano curl wget \
-            net-tools iputils-ping ssh tcpdump \
-            htop sudo lsb-release procps \
-            libcgroup1 cgroupfs-mount
-          sudo umount ${ROOTFS_DIR}/proc
-          sudo umount ${ROOTFS_DIR}/sys
 
+          # 优先替换完整APT源
+          echo "=> Replace full Huawei APT source"
           cat << 'EOF' | sudo tee ${ROOTFS_DIR}/etc/apt/sources.list
           deb https://mirrors.huaweicloud.com/ubuntu-ports/ jammy main restricted universe multiverse
           deb https://mirrors.huaweicloud.com/ubuntu-ports/ jammy-updates main restricted universe multiverse
           deb https://mirrors.huaweicloud.com/ubuntu-ports/ jammy-security main restricted universe multiverse
           EOF
-          
+
+          sudo mount -t proc /proc ${ROOTFS_DIR}/proc
+          sudo mount -t sysfs /sys ${ROOTFS_DIR}/sys
+          sudo chroot ${ROOTFS_DIR} apt-get update
+
+          # 仅安装基础工具，移除所有cgroup额外包
+          echo "=> Install base software stack"
+          sudo chroot ${ROOTFS_DIR} apt-get install -y \
+            openssh-server iproute2 \
+            vim nano curl wget \
+            net-tools iputils-ping ssh tcpdump \
+            htop sudo lsb-release procps
+
+          sudo umount ${ROOTFS_DIR}/proc
+          sudo umount ${ROOTFS_DIR}/sys
+
+          # Root password
           sudo chroot ${ROOTFS_DIR} /bin/bash -c 'echo "root:123456" | chpasswd'
-          
+
+          # SSH allow root login
           printf "PermitRootLogin yes\nPasswordAuthentication yes\n" | sudo tee -a ${ROOTFS_DIR}/etc/ssh/sshd_config > /dev/null
-          
+
+          # Netplan eth0 dhcp
           sudo mkdir -p ${ROOTFS_DIR}/etc/netplan/
           sudo tee ${ROOTFS_DIR}/etc/netplan/01-netcfg.yaml > /dev/null << 'EOF'
           network:
@@ -65,7 +72,7 @@ jobs:
           sudo chroot ${ROOTFS_DIR} systemctl enable systemd-networkd
           sudo chroot ${ROOTFS_DIR} systemctl enable systemd-resolved
 
-          # cgroup v1 config
+          # Systemd force cgroup v1
           sudo mkdir -p ${ROOTFS_DIR}/etc/systemd/system.conf.d/
           cat << 'EOF' | sudo tee ${ROOTFS_DIR}/etc/systemd/system.conf.d/00-cgroup-v1.conf
           [Manager]
@@ -77,6 +84,7 @@ jobs:
           CMDLINE_EXTRA="systemd.unified_cgroup_hierarchy=0 cgroup_enable=memory swapaccount=1"
           EOF
 
+          # Custom mount service for v1
           sudo tee ${ROOTFS_DIR}/etc/systemd/system/mount-cgroupv1.service > /dev/null << 'EOF'
           [Unit]
           Description=Mount CGroup V1 Subsystems
@@ -85,16 +93,10 @@ jobs:
           Type=oneshot
           ExecStart=/bin/bash -c '
           mkdir -p /sys/fs/cgroup
-          subsystems=(cpu cpuset memory io devices freezer hugetlb pids net_cls net_prio)
+          subsystems=(cpu cpuset memory io devices freezer hugetlb pids net_cls net_prio cpuacct)
           for sub in "${subsystems[@]}"; do
             mkdir -p /sys/fs/cgroup/$sub
             mount -t cgroup -o $sub cgroup /sys/fs/cgroup/$sub
-          done
-          mkdir -p /cgroup
-          mount -t tmpfs tmpfs /cgroup
-          for sub in "${subsystems[@]}"; do
-            mkdir -p /cgroup/$sub
-            mount --bind /sys/fs/cgroup/$sub /cgroup/$sub
           done
           '
           RemainAfterExit=yes
@@ -105,23 +107,7 @@ jobs:
           sudo chroot ${ROOTFS_DIR} systemctl daemon-reload
           sudo chroot ${ROOTFS_DIR} systemctl enable mount-cgroupv1.service
 
-          cat << 'EOF' | sudo tee ${ROOTFS_DIR}/etc/cgconfig.conf
-          mount {
-            cpuset  = /sys/fs/cgroup/cpuset;
-            cpu     = /sys/fs/cgroup/cpu;
-            cpuacct = /sys/fs/cgroup/cpuacct;
-            memory  = /sys/fs/cgroup/memory;
-            devices = /sys/fs/cgroup/devices;
-            freezer = /sys/fs/cgroup/freezer;
-            net_cls = /sys/fs/cgroup/net_cls;
-            net_prio= /sys/fs/cgroup/net_prio;
-            io      = /sys/fs/cgroup/io;
-            pids    = /sys/fs/cgroup/pids;
-            hugetlb = /sys/fs/cgroup/hugetlb;
-          }
-          EOF
-          sudo chroot ${ROOTFS_DIR} systemctl enable cgconfig.service
-
+          # Clean cache
           sudo chroot ${ROOTFS_DIR} apt-get clean
 
       - name: Package to EXT4
